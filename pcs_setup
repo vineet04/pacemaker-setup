@@ -1,0 +1,173 @@
+#!/bin/bash
+
+########################################
+#Date: 23rd March 2017                 #
+#Author: Vineet Sinha                  #
+#Script to deploy pacemaker in RHEL 7  #
+########################################
+
+#
+#Check if file exists that contains IP addressed of nodes to form cluster
+#
+
+if [ -f /var/tmp/ips ]
+  
+  then `cat /dev/null > /var/tmp/ips`
+
+else touch  /var/tmp/ips
+
+fi
+
+#Script USage help
+
+if [ "$#" -lt 2 ]
+then
+      echo $"usage: $0 { arg1 | arg2 }
+                where:
+                arg1 name of the cluster
+                arg2 number of nodes in cluster"
+      exit 1
+
+fi
+
+NAME=$1;
+count=$2;
+counter=0;
+
+
+while [[ $counter -lt $count ]];
+do
+echo -e "\n\n ******Enter Ip addresses of hosts to be added in cluster******\n\n";
+
+read  -p "Ip address:" IP
+
+echo -ne "Ip:$IP\t"  >> /var/tmp/ips
+
+((count--))
+
+done
+
+###################################
+#Check Ip addresses are reachable#
+###################################
+
+
+for i in `cat /var/tmp/ips | tr -d "Ip:"`
+
+do
+ping -c1 -q $i &>/dev/null
+
+if [ $? == 0 ] ; then
+
+    echo -e "\n\n****** IP ping success!******\n\n"
+
+else
+
+    echo -e "\n\n****** IP ping failure******\n\n"
+
+    exit
+fi
+
+done
+
+#
+# Check system is registered to RHSM and cluster repos are enabled.
+# Check for cluster package, if not present install packages.
+# Note - ensure subscription-manager package is upto date.
+# With version subscription-manager-1.13.22-1, registration may not be successful in first attempt.
+#
+
+if [ -f /var/tmp/rhsm_logs ]
+
+  then `cat /dev/null > /var/tmp/rhsm_logs`
+
+else touch  /var/tmp/rhsm_logs
+
+fi
+
+echo -e "\nSubscription Manager registration will start if host is not registered. This will take sometime.. \n"
+
+echo  -e "\n\n******Enter rhsm username ******\n\n"
+
+read -p "RHSM username:" username
+
+echo -e "\n\n*****Enter rhsm password *****\n\n"
+
+read  -p "password:" -s password
+
+echo -e "\n\n"
+for i in `cat /var/tmp/ips | tr -d "Ip:"`
+do
+
+ssh -o "UserKnownHostsFile=no" -o "StrictHostKeyChecking=no" root@$i -t -t "echo -e "\n\n";\
+echo -e " ******RHSM and Package phase..This will take some time...*******";\
+subscription-manager register --username=$username --password=$password;\
+subscription-manager attach --pool=8a85f9833e1404a9013e3cddf99305e6;\
+subscription-manager repos --disable=*;\
+subscription-manager repos --enable rhel-7-server-rpms --enable rhel-rs-for-rhel-7-server-rpms;\
+yum install -y -q pcs fence-agents-all gfs2-utils;"
+
+done >> /var/tmp/rhsm_logs 2>&1
+
+############################################
+#Set FQDN and update hosts file on each node#
+############################################
+
+if [ -f /var/tmp/hosts ]
+
+  then `cat /dev/null > /var/tmp/hosts`
+
+else touch  /var/tmp/hosts
+
+fi
+
+
+
+for i in `cat /var/tmp/ips | tr -d "Ip:"`
+do
+echo -e "\n\n Enter FQDN of $i \n\n";
+read -p "FQDN:" FQDN;echo "$i $FQDN ">> /var/tmp/hosts;
+done
+
+
+for  i in `cat /var/tmp/ips | tr -d "Ip:"`
+do
+echo -e "\n\n";\
+echo -e "****** Updating hosts file of nodes ******* "
+cat "/var/tmp/hosts" | ssh root@$i "cat  >> /etc/hosts"
+done
+
+
+
+############################
+#Setup and Install cluster#
+############################
+
+# If log file exists, nullify for each cluster setup
+
+if [ -f /var/tmp/setup_logs ]
+
+  then `cat /dev/null > /var/tmp/setup_logs`
+
+else touch  /var/tmp/setup_logs
+
+fi
+
+
+for i in `cat /var/tmp/ips | tr -d "Ip:"`
+do
+ ssh -o "UserKnownHostsFile=no" -o "StrictHostKeyChecking=no" root@$i -t -t "echo  -e " ****** PCS setup and Install phase.. *******  ";\
+echo "hacluster" | passwd hacluster --stdin;\
+systemctl stop firewalld.service;systemctl disable firewalld.service;\
+setenforce 0;\
+systemctl start pcsd.service;systemctl enable pcsd.service;\
+echo -e "**************";"
+
+done >> /var/tmp/setup_logs 2>&1
+
+NodesIP=`cat /var/tmp/ips | tr -d "Ip:"|awk '{print $1}'`
+
+ssh -o "UserKnownHostsFile=/dev/null" -o "StrictHostKeyChecking=no" $NodesIP -t -t \
+"pcs cluster auth `awk '{ORS=" " } {print $2}' /var/tmp/hosts` -u hacluster -p hacluster;\
+pcs cluster setup --name $NAME `awk '{ORS=" " } {print $2}' /var/tmp/hosts`;\
+pcs cluster start --all;pcs cluster enable --all;"
